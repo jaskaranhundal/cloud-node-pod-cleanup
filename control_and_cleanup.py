@@ -13,6 +13,7 @@ LOG_FILE = "server_control.log"
 KUBE_LOG_FILE = "k8s_cleanup.log"
 PARTIAL_SERVER_NAME = "node2"
 CLOUD_NAME = "otc"
+
 NAMESPACES = ["lindera-production", "lindera-testing", "lindera-development"]
 
 # --- Setup logging ---
@@ -27,8 +28,11 @@ def connect():
     return openstack.connect(cloud=CLOUD_NAME)
 
 def find_servers(conn, partial_name):
-    matched = [s for s in conn.compute.servers() if partial_name in s.name]
-    return matched
+    servers_found = []
+    for server in conn.compute.servers():
+        if partial_name in server.name:
+            servers_found.append(server)
+    return servers_found
 
 def wait_for_server_status(conn, server_id, desired_status, timeout=300, poll_interval=10):
     waited = 0
@@ -53,19 +57,93 @@ def stop_server():
         else:
             log(f"Server already stopped: {server.name}")
 
+def get_server_ip(conn, server):
+    addresses = server.addresses
+    for network in addresses.values():
+        for addr_info in network:
+            # Usually fixed IP is private/internal IP
+            if addr_info.get('OS-EXT-IPS:type') == 'fixed':
+                return addr_info['addr']
+    return None
+
+def is_node_ready(node_name):
+    try:
+        v1 = client.CoreV1Api()
+        node = v1.read_node(name=node_name)
+        for condition in node.status.conditions:
+            if condition.type == "Ready":
+                return condition.status == "True"
+    except Exception as e:
+        log(f"Failed to get node status for {node_name}: {e}")
+    return False
+
+def wait_for_node_ready(node_name, timeout=600, poll_interval=10):
+    waited = 0
+    while waited < timeout:
+        if is_node_ready(node_name):
+            return True
+        time.sleep(poll_interval)
+        waited += poll_interval
+    return False
+
 def start_server():
     conn = connect()
     servers = find_servers(conn, PARTIAL_SERVER_NAME)
     if not servers:
         log(f"No servers found with name containing '{PARTIAL_SERVER_NAME}'")
         return
+
+    # Setup Kubernetes client once here
+    try:
+        try:
+            config.load_incluster_config()
+        except:
+            config.load_kube_config()
+    except Exception as e:
+        log(f"Failed to load Kubernetes config: {e}")
+        return
+
+    v1 = client.CoreV1Api()
+
     for server in servers:
         if server.status.lower() == "shutoff":
             conn.compute.start_server(server.id)
             log(f"Starting server: {server.name} ...")
             if wait_for_server_status(conn, server.id, "active"):
                 log(f"Server {server.name} is active.")
-                cleanup_duplicate_pods()
+                server_ip = get_server_ip(conn, server)
+                if not server_ip:
+                    log(f"Could not determine IP for server {server.name}. Proceeding with pod cleanup.")
+                    cleanup_duplicate_pods()
+                    continue
+
+                # Find node name by IP
+                node_name = None
+                try:
+                    nodes = v1.list_node().items
+                    for node in nodes:
+                        for addr in node.status.addresses:
+                            if addr.address == server_ip:
+                                node_name = node.metadata.name
+                                break
+                        if node_name:
+                            break
+                except Exception as e:
+                    log(f"Failed to list nodes: {e}")
+                    cleanup_duplicate_pods()
+                    continue
+
+                if not node_name:
+                    log(f"Node with IP {server_ip} not found in cluster. Proceeding with pod cleanup.")
+                    cleanup_duplicate_pods()
+                    continue
+
+                log(f"Waiting for node '{node_name}' to become Ready...")
+                if wait_for_node_ready(node_name):
+                    log(f"Node '{node_name}' is Ready. Starting pod cleanup.")
+                    cleanup_duplicate_pods()
+                else:
+                    log(f"Timeout waiting for node '{node_name}' to become Ready. Skipping pod cleanup.")
             else:
                 log(f"Timeout waiting for server {server.name} to become active.")
         else:
