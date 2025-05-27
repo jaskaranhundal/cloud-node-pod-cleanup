@@ -36,15 +36,6 @@ Install dependencies:
 pip install -r requirements.txt
 ```
 
-## 📝 Configuration**
-  
-Edit control_and_cleanup.py:
-```bash
-PARTIAL_SERVER_NAME = "node2"
-CLOUD_NAME = "otc"
-NAMESPACES = ["lindera-production", "lindera-testing", "lindera-development"]
-```
-
 ## 📝 Configuration
 Edit `control_and_cleanup.py`:
 ```bash
