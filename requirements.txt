@@ -1,0 +1,11 @@
+
+---
+
+### Optional: `requirements.txt`
+
+If you'd like to include a `requirements.txt` for easier install:
+
+```txt
+openstacksdk
+kubernetes
+pytz
